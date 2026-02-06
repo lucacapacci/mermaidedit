@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mermaid Editor & Renderer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Content Security Policy (allow inline app script; tighten further when hosting) -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' https://cdn.jsdelivr.net;
+                 img-src 'self' data: blob:;
+                 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                 script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+                 connect-src 'self';
+                 base-uri 'none';
+                 form-action 'none';
+                 frame-ancestors 'none';">
+
+  <!-- Mermaid & LZ-String (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0b0c0d;
+      --panel: #121417;
+      --panel-2: #171a1f;
+      --text: #e7eef7;
+      --muted: #a7b2c3;
+      --accent: #48a0ff;
+      --danger: #ff6b6b;
+      --border: #1f2430;
+      --mark-bg: #fff3b0;   /* highlight for dark theme */
+      --mark-fg: #0b0c0d;
+      --resizer: #2a2f3a;
+      --resizer-hover: #3a4150;
+    }
+    [data-theme="light"] {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #f2f4f8;
+      --text: #0b0c0d;
+      --muted: #3b4453;
+      --accent: #185adb;
+      --danger: #c0392b;
+      --border: #dfe3ea;
+      --mark-bg: #fff2a8;   /* highlight for light theme */
+      --mark-fg: #0b0c0d;
+      --resizer: #d7dbe2;
+      --resizer-hover: #cbd1da;
+    }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      height: 100%;
+      gap: 8px;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    header, footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    header .left, header .right, footer .left, footer .right {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .brand { font-weight: 700; letter-spacing: 0.2px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      cursor: pointer; user-select: none;
+    }
+    .pill.secondary { background: transparent; }
+    .pill.accent { background: var(--accent); color: white; border-color: transparent; }
+    .pill:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* --- Resizable split layout --- */
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 6px 1fr; /* left | resizer | right */
+      gap: 12px;
+      min-height: 0;
+      align-items: stretch;
+    }
+    .resizer {
+      background: var(--resizer);
+      border-radius: 8px;
+      cursor: col-resize;
+      transition: background-color .15s ease;
+    }
+    .resizer:hover, .resizer.dragging {
+      background: var(--resizer-hover);
+    }
+
+    .pane {
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px; min-height: 0;
+      overflow: hidden;
+    }
+    .pane header {
+      background: transparent; border: none; padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      border-radius: 10px 10px 0 0;
+    }
+    textarea {
+      flex: 1; width: 100%; box-sizing: border-box;
+      background: var(--panel); color: var(--text);
+      border: none; outline: none; padding: 12px;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      resize: none; tab-size: 2; caret-color: var(--accent);
+    }
+    .preview { flex: 1; overflow: auto; padding: 12px; }
+    .statusbar {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; padding: 8px 10px; background: var(--panel-2);
+      border-top: 1px solid var(--border);
+      border-radius: 0 0 10px 10px; min-height: 36px;
+      color: var(--muted); font-size: 12px;
+    }
+    .error { color: var(--danger); white-space: pre-wrap; word-break: break-word; }
+    .hint { color: var(--muted); }
+    .spacer { flex: 1; }
+    @media (max-width: 980px) {
+      .split { grid-template-columns: 1fr 6px 1fr; grid-auto-rows: 48vh; }
+      /* On small screens the resizer still works horizontally */
+    }
+    .preview svg { background: transparent; }
+    a.link { color: var(--accent); text-decoration: none; }
+    a.link:hover { text-decoration: underline; }
+
+    /* Optional visual cursor while panning */
+    .panning { cursor: grab; }
+    .panning.dragging { cursor: grabbing; }
+
+    /* Fullscreen adjustments (optional, content already scales) */
+    :fullscreen .preview { padding: 12px; }
+
+    /* Subtle helper line inside preview for controls */
+    .controls-hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      user-select: none;
+    }
+
+    /* <mark> styling for highlighted text inside Mermaid labels */
+    .preview mark {
+      background: var(--mark-bg);
+      color: var(--mark-fg);
+      padding: 0 .2em;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+<body data-theme="light">
+  <div class="app">
+    <header>
+      <div class="left">
+        <div class="brand">Mermaid</div>
+        <button id="btnTheme" class="pill secondary" title="Toggle theme (Light/Dark)">🌗 Theme</button>
+        <button id="btnRender" class="pill" title="Force re-render (Ctrl/Cmd + Enter)">🔁 Render</button>
+        <button id="btnShare" class="pill" title="Update URL with compressed diagram">🔗 Share URL</button>
+      </div>
+      <div class="right">
+        <button id="btnFullscreen" class="pill secondary" title="Toggle Preview Fullscreen">⛶ Fullscreen</button>
+        <button id="btnExportSvg" class="pill" title="Export as SVG">⬇️ SVG</button>
+        <button id="btnExportPng" class="pill accent" title="Export as PNG">⬇️ PNG</button>
+      </div>
+    </header>
+
+    <div class="split" id="split">
+      <div class="pane" id="leftPane">
+        <header>
+          <div class="left">Editor</div>
+          <div class="spacer"></div>
+          <div class="right hint">Tip: Ctrl/Cmd + Enter to render</div>
+        </header>
+        <textarea id="editor" spellcheck="false" aria-label="Mermaid source"></textarea>
+        <div class="statusbar" id="statusEditor">
+          <span class="hint" id="posHint">Ln 1, Col 1</span>
+          <span class="spacer"></span>
+          <span class="hint">Diagram type: auto-detected</span>
+        </div>
+      </div>
+
+      <!-- Resizer -->
+      <div class="resizer" id="resizer" title="Drag to resize editor & preview"></div>
+
+      <div id="previewPane" class="pane">
+        <header>
+          <div class="left">Preview</div>
+          <div class="spacer"></div>
+          <div class="right hint">Mermaid v10</div>
+        </header>
+        <div class="preview panning" id="preview" aria-live="polite">
+          <div class="controls-hint">🖱️ Zoom: mouse scroll • Pan: drag with left mouse button • Double‑click: zoom in (Shift+double‑click: out)</div>
+        </div>
+        <div class="statusbar" id="statusPreview">
+          <span id="error" class="error"></span>
+          <span class="spacer"></span>
+          <span class="hint" id="renderInfo"></span>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="left">
+        <span class="hint">Built for quick sequence diagrams • Works offline (after first load)</span>
+      </div>
+      <div class="right">
+        <a class="link" href="https://mermaid.js.org" target="_blank" rel="noopener noreferrer">Mermaid Docs</a>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // Guard: ensure libraries loaded
+    if (!window.mermaid) alert('Mermaid failed to load. Check your connection to jsDelivr.');
+
+    // Initialize Mermaid with secure defaults (no maxTextSize cap)
+    let currentTheme = 'light';
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: currentTheme,
+      securityLevel: 'strict',
+      fontFamily: 'Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif'
+    });
+
+    // DOM references
+    const editor = document.getElementById('editor');
+    const preview = document.getElementById('preview');
+    const previewPane = document.getElementById('previewPane');
+    const errorEl = document.getElementById('error');
+    const renderInfo = document.getElementById('renderInfo');
+    const posHint = document.getElementById('posHint');
+
+    const btnRender = document.getElementById('btnRender');
+    const btnTheme = document.getElementById('btnTheme');
+    const btnShare = document.getElementById('btnShare');
+    const btnExportSvg = document.getElementById('btnExportSvg');
+    const btnExportPng = document.getElementById('btnExportPng');
+    const btnFullscreen = document.getElementById('btnFullscreen');
+
+    const split = document.getElementById('split');
+    const leftPane = document.getElementById('leftPane');
+    const resizer = document.getElementById('resizer');
+
+    // Default example (sequence diagram)
+    const defaultDiagram = `%% Mermaid sequence diagram
+%% Try editing and hit Ctrl/Cmd + Enter to re-render
+
+
+sequenceDiagram
+  autonumber
+  actor User as ==User (You)==
+  participant FE as Frontend
+  participant API as API Gateway
+  participant SVC as Service
+  participant DB as Database
+
+  User->>FE: Open /checkout
+  activate FE
+  FE->>API: GET /cart
+  activate API
+  API->>SVC: Fetch cart(userId)
+  activate SVC
+  SVC->>DB: SELECT items FROM carts WHERE user_id = ?
+  DB-->>SVC: rows
+  SVC-->>API: cart JSON
+  API-->>FE: 200 OK + ==cart JSON==
+  deactivate SVC
+  deactivate API
+
+  FE->>API: POST /checkout
+  activate API
+  API->>SVC: Create order(cart)
+  alt Stock OK
+    SVC-->>API: OrderId
+    API-->>FE: 201 Created + OrderId
+  else Stock Missing
+    SVC-->>API: Error(409)
+    API-->>FE: 409 Conflict
+  end
+  deactivate API
+  deactivate FE
+
+  Note over User,FE: Example flow with ==highlighted== labels and autonumber
+`;
+
+    // Hash-based sharing
+    function loadFromHash() {
+      if (location.hash && location.hash.length > 1) {
+        try {
+          const compressed = location.hash.slice(1);
+          const text = LZString.decompressFromEncodedURIComponent(compressed);
+          if (text && text.trim().length) return text;
+        } catch (e) {
+          console.warn('Failed to parse hash:', e);
+        }
+      }
+      return defaultDiagram;
+    }
+    function updateHash(diagramText) {
+      const compressed = LZString.compressToEncodedURIComponent(diagramText);
+      history.replaceState(null, '', '#' + compressed);
+    }
+
+    // Debounce utility
+    function debounce(fn, ms) {
+      let t;
+      return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    // ====== Zoom & Pan state ======
+    let zp = {
+      k: 1,                // zoom scale
+      tx: 0, ty: 0,        // translate
+      min: 0.2,
+      max: 8,
+      step: 1.1            // wheel/dblclick scale step
+    };
+
+    function applyTransform(svgEl) {
+      if (!svgEl) return;
+      let rootG = svgEl.querySelector('g[data-vc-zoomroot]');
+      if (!rootG) {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('data-vc-zoomroot', 'true');
+        while (svgEl.firstChild) g.appendChild(svgEl.firstChild);
+        svgEl.appendChild(g);
+        rootG = g;
+      }
+      rootG.setAttribute('transform', `translate(${zp.tx},${zp.ty}) scale(${zp.k})`);
+    }
+
+    function clientToSvg(svgEl, clientX, clientY) {
+      const pt = svgEl.createSVGPoint();
+      pt.x = clientX; pt.y = clientY;
+      const ctm = svgEl.getScreenCTM();
+      if (!ctm) return { x: 0, y: 0 };
+      const inv = ctm.inverse();
+      const sp = pt.matrixTransform(inv);
+      return { x: (sp.x - zp.tx) / zp.k, y: (sp.y - zp.ty) / zp.k };
+    }
+
+    function limitZoom(val) {
+      return Math.min(zp.max, Math.max(zp.min, val));
+    }
+
+    // Pan handlers
+    let isPanning = false;
+    let panStart = { x: 0, y: 0, tx: 0, ty: 0 };
+
+    function attachZoomPan(svgEl) {
+      if (!svgEl) return;
+
+      preview.classList.add('panning');
+
+      // Wheel zoom (mouse wheel only)
+      svgEl.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const { clientX, clientY, deltaY } = e;
+        const p = clientToSvg(svgEl, clientX, clientY);
+        const dir = deltaY > 0 ? 1 / zp.step : zp.step;
+        const newK = limitZoom(zp.k * dir);
+        // keep the point under cursor stationary: adjust translation
+        zp.tx = p.x - (p.x - zp.tx) * (newK / zp.k);
+        zp.ty = p.y - (p.y - zp.ty) * (newK / zp.k);
+        zp.k = newK;
+        applyTransform(svgEl);
+      }, { passive: false });
+
+      // Mouse pan (left-button drag)
+      svgEl.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        isPanning = true;
+        preview.classList.add('dragging');
+        panStart = { x: e.clientX, y: e.clientY, tx: zp.tx, ty: zp.ty };
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!isPanning) return;
+        const dx = (e.clientX - panStart.x);
+        const dy = (e.clientY - panStart.y);
+        zp.tx = panStart.tx + dx;
+        zp.ty = panStart.ty + dy;
+        applyTransform(svgEl);
+      });
+      window.addEventListener('mouseup', () => {
+        isPanning = false;
+        preview.classList.remove('dragging');
+      });
+
+      // Double-click zoom in at cursor; Shift+Double-click zoom out
+      svgEl.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        const p = clientToSvg(svgEl, e.clientX, e.clientY);
+        const factor = e.shiftKey ? (1 / zp.step) : zp.step;
+        const newK = limitZoom(zp.k * factor);
+        zp.tx = p.x - (p.x - zp.tx) * (newK / zp.k);
+        zp.ty = p.y - (p.y - zp.ty) * (newK / zp.k);
+        zp.k = newK;
+        applyTransform(svgEl);
+      });
+    }
+
+    // ====== Resizable split (Editor | Preview) ======
+    (function makeResizable() {
+      let dragging = false;
+      let startX = 0;
+      let leftStartWidth = 0;
+      let totalWidth = 0;
+
+      resizer.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        dragging = true;
+        resizer.classList.add('dragging');
+        const rect = split.getBoundingClientRect();
+        totalWidth = rect.width - 6 - 12; // total minus resizer width and grid gap (approx)
+        startX = e.clientX;
+        leftStartWidth = leftPane.getBoundingClientRect().width;
+        document.body.style.userSelect = 'none';
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        let newLeft = leftStartWidth + dx;
+        const min = 160; // minimal width for each pane
+        const max = totalWidth - min;
+        newLeft = Math.max(min, Math.min(max, newLeft));
+        const right = totalWidth - newLeft;
+        // Set explicit column widths
+        split.style.gridTemplateColumns = `${newLeft}px 6px ${right}px`;
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        resizer.classList.remove('dragging');
+        document.body.style.userSelect = '';
+      });
+    })();
+
+    // Rendering pipeline
+    let lastSvg = '';
+    let lastId = 0;
+
+    async function renderDiagram() {
+      const rawSource = editor.value;
+
+      const start = performance.now();
+      errorEl.textContent = '';
+      // Keep the controls-hint element at the top of preview when re-rendering
+      const hint = preview.querySelector('.controls-hint');
+      preview.innerHTML = '';
+      if (hint) preview.appendChild(hint);
+
+      try {
+        await mermaid.parse(rawSource);
+
+        const id = 'code-' + (++lastId);
+        const { svg } = await mermaid.render(id, rawSource);
+        lastSvg = svg;
+
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = svg;
+
+        const svgEl = wrapper.querySelector('svg');
+        if (svgEl) {
+          svgEl.setAttribute('role', 'img');
+          svgEl.setAttribute('aria-label', 'Rendered Mermaid diagram');
+          svgEl.style.maxWidth = '100%';
+          svgEl.style.height = 'auto';
+        }
+        preview.appendChild(wrapper);
+
+        // Apply current zoom/pan state to new SVG and attach handlers
+        if (svgEl) {
+          applyTransform(svgEl);
+          attachZoomPan(svgEl);
+        }
+
+        const took = Math.max(1, Math.round(performance.now() - start));
+        renderInfo.textContent = `Rendered in ${took} ms • ${rawSource.split('\n').length} lines`;
+      } catch (e) {
+        console.error(e);
+        errorEl.textContent = 'Parse/Render error: ' + (e?.str || e?.message || e);
+        renderInfo.textContent = '';
+        lastSvg = '';
+      }
+    }
+
+    const debouncedRender = debounce(renderDiagram, 240);
+
+    // Editor behaviors
+    editor.addEventListener('input', () => {
+      const selStart = editor.selectionStart;
+      const sub = editor.value.slice(0, selStart);
+      const lines = sub.split('\n');
+      posHint.textContent = `Ln ${lines.length}, Col ${lines[lines.length - 1].length + 1}`;
+      debouncedRender();
+    });
+
+    editor.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        renderDiagram();
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = editor.selectionStart;
+        const end = editor.selectionEnd;
+        const value = editor.value;
+        editor.value = value.substring(0, start) + '  ' + value.substring(end);
+        editor.selectionStart = editor.selectionEnd = start + 2;
+      }
+    });
+
+    // UI actions
+    btnRender.addEventListener('click', renderDiagram);
+
+    btnTheme.addEventListener('click', () => {
+      currentTheme = (currentTheme === 'dark') ? 'light' : 'dark';
+      document.body.setAttribute('data-theme', currentTheme);
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: currentTheme,
+        securityLevel: 'strict',
+        fontFamily: 'Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif'
+      });
+      renderDiagram();
+    });
+
+
+    function copyFullUrl() {
+      const url = window.location.href; // includes fragment (#)
+
+      navigator.clipboard.writeText(url)
+        .then(() => {
+          console.log('URL copied:', url);
+        })
+        .catch(err => {
+          console.error('Failed to copy URL:', err);
+        });
+    }
+
+
+    btnShare.addEventListener('click', () => {
+      updateHash(editor.value);
+      btnShare.textContent = '✅ URL Updated';
+      setTimeout(() => (btnShare.textContent = '🔗 Share URL'), 1200);
+      copyFullUrl();
+    });
+
+    btnExportSvg.addEventListener('click', () => {
+      if (!lastSvg) return;
+      const blob = new Blob([lastSvg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      downloadURL(url, 'diagram.svg');
+      URL.revokeObjectURL(url);
+    });
+
+    btnExportPng.addEventListener('click', async () => {
+      if (!lastSvg) return;
+      const pngBlob = await svgToPngBlob(lastSvg, { scale: 2 });
+      const url = URL.createObjectURL(pngBlob);
+      downloadURL(url, 'diagram.png');
+      URL.revokeObjectURL(url);
+    });
+
+    // ====== Fullscreen toggle for Preview pane ======
+    function isFullscreen() {
+      return document.fullscreenElement === previewPane;
+    }
+    async function enterFullscreen() {
+      if (!document.fullscreenElement) {
+        await previewPane.requestFullscreen();
+      }
+    }
+    async function exitFullscreen() {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      }
+    }
+    btnFullscreen.addEventListener('click', async () => {
+      try {
+        if (isFullscreen()) {
+          await exitFullscreen();
+        } else {
+          await enterFullscreen();
+        }
+      } catch (e) {
+        console.warn('Fullscreen error:', e);
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      btnFullscreen.textContent = isFullscreen() ? '⛶ Exit Fullscreen' : '⛶ Fullscreen';
+    });
+
+    function downloadURL(url, filename) {
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    async function svgToPngBlob(svgText, { scale = 1 } = {}) {
+      const tmp = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+      const svgEl = tmp.documentElement;
+      const width = parseFloat(svgEl.getAttribute('width')) || 1024;
+      const height = parseFloat(svgEl.getAttribute('height')) || 512;
+      svgEl.setAttribute('width', width);
+      svgEl.setAttribute('height', height);
+
+      const s = new XMLSerializer().serializeToString(svgEl);
+      const svgBlob = new Blob([s], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      const ctx = canvas.getContext('2d');
+      if (currentTheme === 'light') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      URL.revokeObjectURL(url);
+      return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    }
+
+    // Bootstrap
+    (function init() {
+      const initial = loadFromHash();
+      editor.value = initial;
+      posHint.textContent = 'Ln 1, Col 1';
+      // Start with a balanced split
+      split.style.gridTemplateColumns = '1fr 6px 1fr';
+      renderDiagram();
+    })();
+  </script>
+</body>
+</html>
